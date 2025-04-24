@@ -15,6 +15,7 @@ const CONTRACT_NAME: &str = "crates.io:palomadex-trader-cw";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const WITHDRAW_LIQUIDITY_REPLY_ID: u64 = 1;
+const EXECUTE_REPLY_ID: u64 = 2;
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
@@ -48,18 +49,19 @@ pub fn execute(
             dex_router,
             operations,
             minimum_receive,
-            to,
             max_spread,
             funds,
+            recipient,
         } => execute::exchange(
             deps,
+            env,
             info,
             dex_router,
             operations,
             minimum_receive,
-            to,
             max_spread,
             funds,
+            recipient,
         ),
         ExecuteMsg::SetChainSetting {
             chain_id,
@@ -86,13 +88,6 @@ pub fn execute(
         ExecuteMsg::UpdateConfig { retry_delay } => execute::update_config(deps, info, retry_delay),
         ExecuteMsg::AddOwner { owners } => execute::add_owner(deps, info, owners),
         ExecuteMsg::RemoveOwner { owner } => execute::remove_owner(deps, info, owner),
-        ExecuteMsg::SendToken {
-            chain_id,
-            token,
-            to,
-            amount,
-            nonce,
-        } => execute::send_token(deps, env, info, chain_id, token, to, amount, nonce),
         ExecuteMsg::AddLiquidity {
             pair,
             coins,
@@ -119,37 +114,58 @@ pub mod execute {
             Asset, AssetInfo, ExecuteJob, ExternalExecuteMsg, ExternalQueryMsg, PairInfo,
             SwapOperation,
         },
-        state::{ChainSetting, CHAIN_SETTINGS, MESSAGE_TIMESTAMP},
+        state::{ChainSetting, CHAIN_SETTINGS},
     };
     use std::str::FromStr;
 
     #[allow(clippy::too_many_arguments)]
     pub fn exchange(
         deps: DepsMut,
+        env: Env,
         info: MessageInfo,
         dex_router: Addr,
         operations: Vec<SwapOperation>,
         minimum_receive: Option<Uint128>,
-        to: Option<String>,
         max_spread: Option<Decimal>,
         funds: Vec<Coin>,
+        recipient: String,
     ) -> Result<Response<PalomaMsg>, ContractError> {
         let state = STATE.load(deps.storage)?;
         assert!(
             state.owners.iter().any(|x| x == info.sender),
             "Unauthorized"
         );
+
+        let coin: Coin;
+
+        let SwapOperation::AstroSwap { ask_asset_info, .. } = operations.last().unwrap();
+
+        if let AssetInfo::NativeToken { denom } = ask_asset_info {
+            coin = deps
+                .querier
+                .query_balance(env.contract.address.clone(), denom.clone())?;
+        } else {
+            return Err(ContractError::UnsupportedCw20 {});
+        }
+
+        let payload = to_json_binary(&(recipient, coin))?;
         Ok(Response::new()
-            .add_message(CosmosMsg::Wasm(WasmMsg::Execute {
-                contract_addr: dex_router.to_string(),
-                msg: to_json_binary(&ExternalExecuteMsg::ExecuteSwapOperations {
-                    operations,
-                    minimum_receive,
-                    to,
-                    max_spread,
-                })?,
-                funds,
-            }))
+            .add_submessage(SubMsg {
+                id: EXECUTE_REPLY_ID,
+                msg: CosmosMsg::Wasm(WasmMsg::Execute {
+                    contract_addr: dex_router.to_string(),
+                    msg: to_json_binary(&ExternalExecuteMsg::ExecuteSwapOperations {
+                        operations,
+                        minimum_receive,
+                        to: None,
+                        max_spread,
+                    })?,
+                    funds,
+                }),
+                payload,
+                gas_limit: None,
+                reply_on: ReplyOn::Success,
+            })
             .add_attribute("action", "exchange"))
     }
 
@@ -579,107 +595,6 @@ pub mod execute {
         STATE.save(deps.storage, &state)?;
         Ok(Response::new().add_attribute("action", "update_config"))
     }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn send_token(
-        deps: DepsMut,
-        env: Env,
-        info: MessageInfo,
-        chain_id: String,
-        token: String,
-        to: String,
-        amount: Uint128,
-        nonce: Uint128,
-    ) -> Result<Response<PalomaMsg>, ContractError> {
-        let state = STATE.load(deps.storage)?;
-        assert!(
-            state.owners.iter().any(|x| x == info.sender),
-            "Unauthorized"
-        );
-        #[allow(deprecated)]
-        let contract: Contract = Contract {
-            constructor: None,
-            functions: BTreeMap::from_iter(vec![(
-                "send_token".to_string(),
-                vec![Function {
-                    name: "send_token".to_string(),
-                    inputs: vec![
-                        Param {
-                            name: "token".to_string(),
-                            kind: ParamType::Address,
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "to".to_string(),
-                            kind: ParamType::Address,
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "amount".to_string(),
-                            kind: ParamType::Uint(256),
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "nonce".to_string(),
-                            kind: ParamType::Uint(256),
-                            internal_type: None,
-                        },
-                    ],
-                    outputs: Vec::new(),
-                    constant: None,
-                    state_mutability: StateMutability::NonPayable,
-                }],
-            )]),
-            events: BTreeMap::new(),
-            errors: BTreeMap::new(),
-            receive: false,
-            fallback: false,
-        };
-        let tokens = &[
-            Token::Address(Address::from_str(token.as_str()).unwrap()),
-            Token::Address(Address::from_str(to.as_str()).unwrap()),
-            Token::Uint(Uint::from_big_endian(&amount.to_be_bytes())),
-            Token::Uint(Uint::from_big_endian(&nonce.to_be_bytes())),
-        ];
-
-        let retry_delay = state.retry_delay;
-        if let Some(timestamp) =
-            MESSAGE_TIMESTAMP.may_load(deps.storage, (chain_id.clone(), nonce.to_string()))?
-        {
-            if timestamp.plus_seconds(retry_delay).lt(&env.block.time) {
-                MESSAGE_TIMESTAMP.save(
-                    deps.storage,
-                    (chain_id.clone(), nonce.to_string()),
-                    &env.block.time,
-                )?;
-            } else {
-                return Err(ContractError::Pending {});
-            }
-        } else {
-            MESSAGE_TIMESTAMP.save(
-                deps.storage,
-                (chain_id.clone(), nonce.to_string()),
-                &env.block.time,
-            )?;
-        }
-
-        Ok(Response::new()
-            .add_message(CosmosMsg::Custom(PalomaMsg::SchedulerMsg {
-                execute_job: ExecuteJob {
-                    job_id: CHAIN_SETTINGS
-                        .load(deps.storage, chain_id.clone())?
-                        .main_job_id,
-                    payload: Binary::new(
-                        contract
-                            .function("send_token")
-                            .unwrap()
-                            .encode_input(tokens.as_slice())
-                            .unwrap(),
-                    ),
-                },
-            }))
-            .add_attribute("action", "send_token"))
-    }
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -707,38 +622,59 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Response<PalomaMsg>,
                     msg_responses: _,
                 }),
         } => {
-            let (coins, receiver, chain_id): (Vec<Coin>, String, String) = from_json(payload)?;
+            let (mut coins, receiver, chain_id): (Vec<Coin>, String, String) = from_json(payload)?;
 
-            let amount0 = deps
+            coins[0].amount = deps
                 .querier
                 .query_balance(env.contract.address.clone(), coins[0].clone().denom)?
                 .amount
                 - coins[0].amount;
-            let amount1 = deps
+            coins[1].amount = deps
                 .querier
                 .query_balance(env.contract.address.clone(), coins[1].clone().denom)?
                 .amount
                 - coins[1].amount;
-            let amount0 = amount0.to_string() + coins[0].denom.as_str();
-            let amount1 = amount1.to_string() + coins[1].denom.as_str();
             Ok(Response::new()
                 .add_messages(vec![
                     CosmosMsg::Custom(PalomaMsg::SkywayMsg {
                         send_tx: SendTx {
                             remote_chain_destination_address: receiver.clone(),
-                            amount: amount0,
+                            amount: coins[0].to_string(),
                             chain_reference_id: chain_id.clone(),
                         },
                     }),
                     CosmosMsg::Custom(PalomaMsg::SkywayMsg {
                         send_tx: SendTx {
                             remote_chain_destination_address: receiver,
-                            amount: amount1,
+                            amount: coins[1].to_string(),
                             chain_reference_id: chain_id,
                         },
                     }),
                 ])
                 .add_attribute("action", "withdraw_liquidity"))
+        }
+        #[allow(deprecated)]
+        Reply {
+            id: EXECUTE_REPLY_ID,
+            payload,
+            gas_used: _,
+            result:
+                SubMsgResult::Ok(SubMsgResponse {
+                    events: _,
+                    data: _,
+                    msg_responses: _,
+                }),
+        } => {
+            let (recipient, coin): (String, Coin) = from_json(payload)?;
+            Ok(Response::new()
+                .add_message(CosmosMsg::Custom(PalomaMsg::SkywayMsg {
+                    send_tx: SendTx {
+                        remote_chain_destination_address: recipient,
+                        amount: coin.to_string(),
+                        chain_reference_id: coin.denom,
+                    },
+                }))
+                .add_attribute("action", "execute_reply"))
         }
         _ => Err(ContractError::UnknownReply {}),
     }

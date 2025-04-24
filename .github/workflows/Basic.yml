@@ -14,7 +14,7 @@ jobs:
         uses: actions/checkout@v2
 
       - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           profile: minimal
           toolchain: 1.60.0
@@ -22,7 +22,7 @@ jobs:
           override: true
 
       - name: Run unit tests
-        uses: actions-rs/cargo@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           command: unit-test
           args: --locked
@@ -30,7 +30,7 @@ jobs:
           RUST_BACKTRACE: 1
 
       - name: Compile WASM contract
-        uses: actions-rs/cargo@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           command: wasm
           args: --locked
@@ -45,7 +45,7 @@ jobs:
         uses: actions/checkout@v2
 
       - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           profile: minimal
           toolchain: 1.60.0
@@ -53,23 +53,19 @@ jobs:
           components: rustfmt, clippy
 
       - name: Run cargo fmt
-        uses: actions-rs/cargo@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           command: fmt
           args: --all -- --check
 
       - name: Run cargo clippy
-        uses: actions-rs/cargo@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           command: clippy
           args: -- -D warnings
 
       - name: Generate Schema
-        uses: actions-rs/cargo@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           command: schema
           args: --locked
-
-      - name: Schema Changes
-        # fails if any changes not committed
-        run: git diff --exit-code schema

@@ -1,7 +1,7 @@
+#[allow(unused_imports)]
+use crate::state::{ChainSetting, State};
 use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{Addr, Binary, Coin, CustomMsg, Decimal, Uint128, Uint256};
-
-use crate::state::{ChainSetting, State};
 
 #[cw_serde]
 pub struct InstantiateMsg {
@@ -15,16 +15,9 @@ pub enum ExecuteMsg {
         dex_router: Addr,
         operations: Vec<SwapOperation>,
         minimum_receive: Option<Uint128>,
-        to: Option<String>,
         max_spread: Option<Decimal>,
         funds: Vec<Coin>,
-    },
-    SendToken {
-        chain_id: String,
-        token: String,
-        to: String,
-        amount: Uint128,
-        nonce: Uint128,
+        recipient: String,
     },
     AddLiquidity {
         pair: Addr,
