@@ -14,6 +14,9 @@ pub enum ContractError {
 
     #[error("Unknown Reply")]
     UnknownReply {},
+
+    #[error("CW20 is not supported")]
+    UnsupportedCw20 {},
     // Add any other custom errors you like here.
     // Look at https://docs.rs/thiserror/1.0.21/thiserror/ for details.
 }
