@@ -22,7 +22,7 @@ jobs:
           override: true
 
       - name: Run unit tests
-        uses: actions-rs/cargo@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           command: unit-test
           args: --locked
@@ -30,7 +30,7 @@ jobs:
           RUST_BACKTRACE: 1
 
       - name: Compile WASM contract
-        uses: actions-rs/cargo@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           command: wasm
           args: --locked
@@ -53,19 +53,19 @@ jobs:
           components: rustfmt, clippy
 
       - name: Run cargo fmt
-        uses: actions-rs/cargo@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           command: fmt
           args: --all -- --check
 
       - name: Run cargo clippy
-        uses: actions-rs/cargo@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           command: clippy
           args: -- -D warnings
 
       - name: Generate Schema
-        uses: actions-rs/cargo@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
           command: schema
           args: --locked
