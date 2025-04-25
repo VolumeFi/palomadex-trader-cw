@@ -17,12 +17,14 @@ pub enum ExecuteMsg {
         minimum_receive: Option<Uint128>,
         max_spread: Option<Decimal>,
         funds: Vec<Coin>,
+        chain_id: String,
         recipient: String,
     },
     AddLiquidity {
         pair: Addr,
         coins: Vec<Coin>,
         slippage_tolerance: Option<Decimal>,
+        depositor: String,
     },
     RemoveLiquidity {
         chain_id: String,
@@ -146,10 +148,15 @@ pub enum QueryMsg {
     /// Query the current chain settings
     #[returns(ChainSetting)]
     ChainSetting { chain_id: String },
+
+    #[returns(Uint128)]
+    LpQuery { user: String, lp_token: String },
 }
 
 #[cw_serde]
+#[derive(QueryResponses)]
 pub enum ExternalQueryMsg {
+    #[returns(PairInfo)]
     Pair {},
 }
 
