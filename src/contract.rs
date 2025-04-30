@@ -17,6 +17,7 @@ const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const REMOVE_LIQUIDITY_REPLY_ID: u64 = 1;
 const EXECUTE_REPLY_ID: u64 = 2;
 const ADD_LIQUIDITY_REPLY_ID: u64 = 3;
+const EXECUTE_FOR_SINGLE_LIQUIDITY_REPLY_ID: u64 = 4;
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
@@ -128,8 +129,7 @@ pub mod execute {
     use super::*;
     use crate::{
         msg::{
-            Asset, AssetInfo, ExecuteJob, ExternalExecuteMsg, ExternalQueryMsg, PairInfo,
-            SwapOperation,
+            Asset, AssetInfo, ConfigResponse, ExecuteJob, ExternalExecuteMsg, ExternalQueryMsg, FeeInfoResponse, PairInfo, PairType, PoolResponse, SwapOperation
         },
         state::{ChainSetting, CHAIN_SETTINGS, LP_BALANCES, MESSAGE_TIMESTAMP},
     };
@@ -215,31 +215,90 @@ pub mod execute {
             pair_info.liquidity_token.to_string(),
             init_lp_balance.balance,
         ))?;
-        Ok(Response::new()
-            .add_submessage(SubMsg {
-                id: ADD_LIQUIDITY_REPLY_ID,
-                msg: CosmosMsg::Wasm(WasmMsg::Execute {
-                    contract_addr: pair.to_string(),
-                    msg: to_json_binary(&ExternalExecuteMsg::ProvideLiquidity {
-                        assets: coins
-                            .iter()
-                            .map(|coin| Asset {
-                                info: AssetInfo::NativeToken {
-                                    denom: coin.denom.clone(),
-                                },
-                                amount: coin.amount,
-                            })
-                            .collect(),
-                        slippage_tolerance,
-                        receiver: None,
-                    })?,
-                    funds: coins,
-                }),
-                payload,
-                gas_limit: None,
-                reply_on: ReplyOn::Success,
-            })
-            .add_attribute("action", "add_liquidity"))
+        if coins.len() == 2 || pair_info.pair_type != (PairType::Xyk {}) {
+            Ok(Response::new()
+                .add_submessage(SubMsg {
+                    id: ADD_LIQUIDITY_REPLY_ID,
+                    msg: CosmosMsg::Wasm(WasmMsg::Execute {
+                        contract_addr: pair.to_string(),
+                        msg: to_json_binary(&ExternalExecuteMsg::ProvideLiquidity {
+                            assets: coins
+                                .iter()
+                                .map(|coin| Asset {
+                                    info: AssetInfo::NativeToken {
+                                        denom: coin.denom.clone(),
+                                    },
+                                    amount: coin.amount,
+                                })
+                                .collect(),
+                            slippage_tolerance,
+                            receiver: None,
+                        })?,
+                        funds: coins,
+                    }),
+                    payload,
+                    gas_limit: None,
+                    reply_on: ReplyOn::Success,
+                })
+                .add_attribute("action", "add_liquidity"))
+        } else {
+            assert!(coins.len() == 1, "Only 1 or 2 coins are supported");
+            let pool_response: PoolResponse = deps.querier.query_wasm_smart(pair.to_string(), &ExternalQueryMsg::Pool {})?;
+            let input_coin = coins[0].clone();
+            let reserve_in = if pool_response.assets[0].info == (AssetInfo::NativeToken { denom: input_coin.denom.clone() }) {
+                pool_response.assets[0].amount
+            } else {
+                pool_response.assets[1].amount
+            };
+            let config_response: ConfigResponse = deps.querier.query_wasm_smart(pair.to_string(), &ExternalQueryMsg::Config {})?;
+            let fee_info_response: FeeInfoResponse = deps.querier.query_wasm_smart(config_response.factory_addr.to_string(), &ExternalQueryMsg::FeeInfo { pair_type: PairType::Xyk {} })?;
+            let fee_bps = fee_info_response.total_fee_bps;
+
+            let swap_amount: Uint128 = calculate_swap_amount(
+                input_coin.amount,
+                reserve_in,
+                fee_bps,
+            )?;
+
+            Ok(Response::new()
+                .add_submessage(SubMsg {
+                    id: EXECUTE_FOR_SINGLE_LIQUIDITY_REPLY_ID,
+                    msg: CosmosMsg::Wasm(WasmMsg::Execute {
+                        contract_addr: pair.to_string(),
+                        msg: to_json_binary(&ExternalExecuteMsg::ProvideLiquidity {
+                            assets: coins
+                                .iter()
+                                .map(|coin| Asset {
+                                    info: AssetInfo::NativeToken {
+                                        denom: coin.denom.clone(),
+                                    },
+                                    amount: coin.amount,
+                                })
+                                .collect(),
+                            slippage_tolerance,
+                            receiver: None,
+                        })?,
+                        funds: coins,
+                    }),
+                    payload,
+                    gas_limit: None,
+                    reply_on: ReplyOn::Success,
+                })
+                .add_attribute("action", "add_liquidity"))
+        }
+    }
+
+    fn calculate_swap_amount(
+        input_amount: Uint128,
+        reserve_in: Uint128,
+        fee_bps: u16,
+    ) -> Result<Uint128, ContractError> {
+        let fee = Decimal::from_ratio(fee_bps, 10000);
+        let adjusted_amount = input_amount * (Decimal::one() - fee);
+        let numerator = adjusted_amount * reserve_in;
+        let denominator = reserve_in + adjusted_amount;
+        let swap_amount = numerator / denominator;
+        Ok(swap_amount)
     }
 
     pub fn remove_liquidity(
