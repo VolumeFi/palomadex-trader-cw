@@ -20,6 +20,13 @@ pub enum ExecuteMsg {
         chain_id: String,
         recipient: String,
     },
+    SendToken {
+        chain_id: String,
+        tokens: Vec<String>,
+        to: String,
+        amounts: Vec<Uint128>,
+        nonce: Uint128,
+    },
     AddLiquidity {
         pair: Addr,
         coins: Vec<Coin>,
@@ -31,6 +38,11 @@ pub enum ExecuteMsg {
         pair: Addr,
         amount: Uint128,
         receiver: String,
+    },
+    SendToEVM {
+        chain_id: String,
+        amounts: Vec<String>,
+        recipient: String,
     },
     SetChainSetting {
         chain_id: String,
