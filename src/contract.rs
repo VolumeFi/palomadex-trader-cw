@@ -66,6 +66,11 @@ pub fn execute(
             chain_id,
             recipient,
         ),
+        ExecuteMsg::SendToEVM {
+            chain_id,
+            amounts,
+            recipient,
+        } => execute::send_to_evm(deps, env, info, chain_id, amounts, recipient),
         ExecuteMsg::SetChainSetting {
             chain_id,
             compass_job_id,
@@ -91,6 +96,13 @@ pub fn execute(
         ExecuteMsg::UpdateConfig { retry_delay } => execute::update_config(deps, info, retry_delay),
         ExecuteMsg::AddOwner { owners } => execute::add_owner(deps, info, owners),
         ExecuteMsg::RemoveOwner { owner } => execute::remove_owner(deps, info, owner),
+        ExecuteMsg::SendToken {
+            chain_id,
+            tokens,
+            to,
+            amounts,
+            nonce,
+        } => execute::send_token(deps, env, info, chain_id, tokens, to, amounts, nonce),
         ExecuteMsg::AddLiquidity {
             pair,
             coins,
@@ -119,7 +131,7 @@ pub mod execute {
             Asset, AssetInfo, ExecuteJob, ExternalExecuteMsg, ExternalQueryMsg, PairInfo,
             SwapOperation,
         },
-        state::{ChainSetting, CHAIN_SETTINGS, LP_BALANCES},
+        state::{ChainSetting, CHAIN_SETTINGS, LP_BALANCES, MESSAGE_TIMESTAMP},
     };
     use std::str::FromStr;
 
@@ -291,6 +303,36 @@ pub mod execute {
                 reply_on: ReplyOn::Success,
             })
             .add_attribute("action", "remove_liquidity"))
+    }
+
+    pub fn send_to_evm(
+        deps: DepsMut,
+        _env: Env,
+        info: MessageInfo,
+        chain_id: String,
+        amounts: Vec<String>,
+        recipient: String,
+    ) -> Result<Response<PalomaMsg>, ContractError> {
+        let state = STATE.load(deps.storage)?;
+        assert!(
+            state.owners.iter().any(|x| x == info.sender),
+            "Unauthorized"
+        );
+        let messages = amounts
+            .iter()
+            .map(|amount| {
+                CosmosMsg::Custom(PalomaMsg::SkywayMsg {
+                    send_tx: SendTx {
+                        remote_chain_destination_address: recipient.clone(),
+                        amount: amount.clone(),
+                        chain_reference_id: chain_id.clone(),
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(Response::new()
+            .add_messages(messages)
+            .add_attribute("action", "send_to_evm"))
     }
 
     pub fn set_chain_setting(
@@ -631,6 +673,121 @@ pub mod execute {
         state.owners.retain(|x| x != owner);
         STATE.save(deps.storage, &state)?;
         Ok(Response::new().add_attribute("action", "update_config"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_token(
+        deps: DepsMut,
+        env: Env,
+        info: MessageInfo,
+        chain_id: String,
+        tokens: Vec<String>,
+        to: String,
+        amounts: Vec<Uint128>,
+        nonce: Uint128,
+    ) -> Result<Response<PalomaMsg>, ContractError> {
+        let state = STATE.load(deps.storage)?;
+        assert!(
+            state.owners.iter().any(|x| x == info.sender),
+            "Unauthorized"
+        );
+        #[allow(deprecated)]
+        let contract: Contract = Contract {
+            constructor: None,
+            functions: BTreeMap::from_iter(vec![(
+                "send_token".to_string(),
+                vec![Function {
+                    name: "send_token".to_string(),
+                    inputs: vec![
+                        Param {
+                            name: "tokens".to_string(),
+                            kind: ParamType::Array(Box::new(ParamType::Address)),
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "to".to_string(),
+                            kind: ParamType::Address,
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "amounts".to_string(),
+                            kind: ParamType::Array(Box::new(ParamType::Uint(256))),
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "nonce".to_string(),
+                            kind: ParamType::Uint(256),
+                            internal_type: None,
+                        },
+                    ],
+                    outputs: Vec::new(),
+                    constant: None,
+                    state_mutability: StateMutability::NonPayable,
+                }],
+            )]),
+            events: BTreeMap::new(),
+            errors: BTreeMap::new(),
+            receive: false,
+            fallback: false,
+        };
+
+        let tokens = tokens
+            .iter()
+            .map(|token| {
+                Token::Address(Address::from_str(token.as_str()).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let amounts = amounts
+            .iter()
+            .map(|amount| {
+                Token::Uint(Uint::from_big_endian(&amount.to_be_bytes()))
+            })
+            .collect::<Vec<_>>();
+
+        let tokens = &[
+            Token::Array(tokens),
+            Token::Address(Address::from_str(to.as_str()).unwrap()),
+            Token::Array(amounts),
+            Token::Uint(Uint::from_big_endian(&nonce.to_be_bytes())),
+        ];
+
+        let retry_delay = state.retry_delay;
+        if let Some(timestamp) =
+            MESSAGE_TIMESTAMP.may_load(deps.storage, (chain_id.clone(), nonce.to_string()))?
+        {
+            if timestamp.plus_seconds(retry_delay).lt(&env.block.time) {
+                MESSAGE_TIMESTAMP.save(
+                    deps.storage,
+                    (chain_id.clone(), nonce.to_string()),
+                    &env.block.time,
+                )?;
+            } else {
+                return Err(ContractError::Pending {});
+            }
+        } else {
+            MESSAGE_TIMESTAMP.save(
+                deps.storage,
+                (chain_id.clone(), nonce.to_string()),
+                &env.block.time,
+            )?;
+        }
+
+        Ok(Response::new()
+            .add_message(CosmosMsg::Custom(PalomaMsg::SchedulerMsg {
+                execute_job: ExecuteJob {
+                    job_id: CHAIN_SETTINGS
+                        .load(deps.storage, chain_id.clone())?
+                        .main_job_id,
+                    payload: Binary::new(
+                        contract
+                            .function("send_token")
+                            .unwrap()
+                            .encode_input(tokens.as_slice())
+                            .unwrap(),
+                    ),
+                },
+            }))
+            .add_attribute("action", "send_token"))
     }
 }
 
