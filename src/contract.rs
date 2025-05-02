@@ -122,14 +122,15 @@ pub fn execute(
 pub mod execute {
     use std::collections::BTreeMap;
 
-    use cosmwasm_std::{Addr, Decimal, ReplyOn, SubMsg, Uint128, Uint256, WasmMsg};
+    use cosmwasm_std::{Addr, Decimal, Decimal256, ReplyOn, SubMsg, Uint128, Uint256, WasmMsg};
     use cw20::{BalanceResponse, Cw20QueryMsg};
     use ethabi::{Address, Contract, Function, Param, ParamType, StateMutability, Token, Uint};
 
     use super::*;
     use crate::{
         msg::{
-            Asset, AssetInfo, ConfigResponse, ExecuteJob, ExternalExecuteMsg, ExternalQueryMsg, FeeInfoResponse, PairInfo, PairType, PoolResponse, SwapOperation
+            Asset, AssetInfo, ConfigResponse, ExecuteJob, ExternalExecuteMsg, ExternalQueryMsg,
+            FeeInfoResponse, PairInfo, PairType, PoolResponse, SwapOperation,
         },
         state::{ChainSetting, CHAIN_SETTINGS, LP_BALANCES, MESSAGE_TIMESTAMP},
     };
@@ -210,12 +211,13 @@ pub mod execute {
                 address: env.contract.address.to_string(),
             },
         )?;
-        let payload = to_json_binary(&(
-            depositor,
-            pair_info.liquidity_token.to_string(),
-            init_lp_balance.balance,
-        ))?;
+
         if coins.len() == 2 || pair_info.pair_type != (PairType::Xyk {}) {
+            let payload = to_json_binary(&(
+                depositor,
+                pair_info.liquidity_token.to_string(),
+                init_lp_balance.balance,
+            ))?;
             Ok(Response::new()
                 .add_submessage(SubMsg {
                     id: ADD_LIQUIDITY_REPLY_ID,
@@ -243,42 +245,77 @@ pub mod execute {
                 .add_attribute("action", "add_liquidity"))
         } else {
             assert!(coins.len() == 1, "Only 1 or 2 coins are supported");
-            let pool_response: PoolResponse = deps.querier.query_wasm_smart(pair.to_string(), &ExternalQueryMsg::Pool {})?;
+            let pool_response: PoolResponse = deps
+                .querier
+                .query_wasm_smart(pair.to_string(), &ExternalQueryMsg::Pool {})?;
             let input_coin = coins[0].clone();
-            let reserve_in = if pool_response.assets[0].info == (AssetInfo::NativeToken { denom: input_coin.denom.clone() }) {
-                pool_response.assets[0].amount
+            let (reserve_in, reserve_out) = if pool_response.assets[0].info
+                == (AssetInfo::NativeToken {
+                    denom: input_coin.denom.clone(),
+                }) {
+                (
+                    pool_response.assets[0].clone(),
+                    pool_response.assets[1].clone(),
+                )
             } else {
-                pool_response.assets[1].amount
+                (
+                    pool_response.assets[1].clone(),
+                    pool_response.assets[0].clone(),
+                )
             };
-            let config_response: ConfigResponse = deps.querier.query_wasm_smart(pair.to_string(), &ExternalQueryMsg::Config {})?;
-            let fee_info_response: FeeInfoResponse = deps.querier.query_wasm_smart(config_response.factory_addr.to_string(), &ExternalQueryMsg::FeeInfo { pair_type: PairType::Xyk {} })?;
+            let config_response: ConfigResponse = deps
+                .querier
+                .query_wasm_smart(pair.to_string(), &ExternalQueryMsg::Config {})?;
+            let fee_info_response: FeeInfoResponse = deps.querier.query_wasm_smart(
+                config_response.factory_addr.to_string(),
+                &ExternalQueryMsg::FeeInfo {
+                    pair_type: PairType::Xyk {},
+                },
+            )?;
             let fee_bps = fee_info_response.total_fee_bps;
 
-            let swap_amount: Uint128 = calculate_swap_amount(
-                input_coin.amount,
-                reserve_in,
-                fee_bps,
-            )?;
+            let swap_amount: Uint128 =
+                calculate_swap_amount(input_coin.amount, reserve_in.amount, fee_bps);
 
+            let coins = vec![
+                Coin {
+                    denom: input_coin.denom.clone(),
+                    amount: input_coin.amount - swap_amount,
+                },
+                deps.querier.query_balance(env.contract.address.clone(), {
+                    if let AssetInfo::NativeToken { denom } = reserve_out.info.clone() {
+                        denom
+                    } else {
+                        return Err(ContractError::UnsupportedCw20 {});
+                    }
+                })?,
+            ];
+
+            let payload = to_json_binary(&(
+                pair.clone(),
+                depositor,
+                pair_info.liquidity_token.to_string(),
+                init_lp_balance.balance,
+                coins,
+            ))?;
             Ok(Response::new()
                 .add_submessage(SubMsg {
                     id: EXECUTE_FOR_SINGLE_LIQUIDITY_REPLY_ID,
                     msg: CosmosMsg::Wasm(WasmMsg::Execute {
                         contract_addr: pair.to_string(),
-                        msg: to_json_binary(&ExternalExecuteMsg::ProvideLiquidity {
-                            assets: coins
-                                .iter()
-                                .map(|coin| Asset {
-                                    info: AssetInfo::NativeToken {
-                                        denom: coin.denom.clone(),
-                                    },
-                                    amount: coin.amount,
-                                })
-                                .collect(),
-                            slippage_tolerance,
-                            receiver: None,
+                        msg: to_json_binary(&ExternalExecuteMsg::ExecuteSwapOperations {
+                            operations: vec![SwapOperation::AstroSwap {
+                                offer_asset_info: reserve_in.info,
+                                ask_asset_info: reserve_out.info,
+                            }],
+                            minimum_receive: None,
+                            to: None,
+                            max_spread: None,
                         })?,
-                        funds: coins,
+                        funds: vec![Coin {
+                            denom: input_coin.denom,
+                            amount: swap_amount,
+                        }],
                     }),
                     payload,
                     gas_limit: None,
@@ -288,17 +325,23 @@ pub mod execute {
         }
     }
 
-    fn calculate_swap_amount(
-        input_amount: Uint128,
-        reserve_in: Uint128,
-        fee_bps: u16,
-    ) -> Result<Uint128, ContractError> {
-        let fee = Decimal::from_ratio(fee_bps, 10000);
-        let adjusted_amount = input_amount * (Decimal::one() - fee);
-        let numerator = adjusted_amount * reserve_in;
-        let denominator = reserve_in + adjusted_amount;
-        let swap_amount = numerator / denominator;
-        Ok(swap_amount)
+    fn calculate_swap_amount(input_amount: Uint128, reserve_in: Uint128, fee_bps: u16) -> Uint128 {
+        let receive_rate = Decimal256::from_ratio(10000 - fee_bps, 10000u16);
+        (((Decimal256::one() + receive_rate).pow(2)
+            + Decimal256::raw(4)
+                * receive_rate
+                * Decimal256::new(input_amount.into())
+                * Decimal256::new(reserve_in.into()))
+        .sqrt()
+            - Decimal256::one()
+            - receive_rate)
+            .checked_div(Decimal256::raw(2))
+            .unwrap()
+            .checked_mul(Decimal256::new(reserve_in.into()))
+            .unwrap()
+            .to_uint_floor()
+            .try_into()
+            .unwrap()
     }
 
     pub fn remove_liquidity(
@@ -792,15 +835,11 @@ pub mod execute {
 
         let tokens = tokens
             .iter()
-            .map(|token| {
-                Token::Address(Address::from_str(token.as_str()).unwrap())
-            })
+            .map(|token| Token::Address(Address::from_str(token.as_str()).unwrap()))
             .collect::<Vec<_>>();
         let amounts = amounts
             .iter()
-            .map(|amount| {
-                Token::Uint(Uint::from_big_endian(&amount.to_be_bytes()))
-            })
+            .map(|amount| Token::Uint(Uint::from_big_endian(&amount.to_be_bytes())))
             .collect::<Vec<_>>();
 
         let tokens = &[
@@ -903,15 +942,30 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Response<PalomaMsg>,
                     msg_responses: _,
                 }),
         } => reply::add_liquidity(deps, env, payload),
+        #[allow(deprecated)]
+        Reply {
+            id: EXECUTE_FOR_SINGLE_LIQUIDITY_REPLY_ID,
+            payload,
+            gas_used: _,
+            result:
+                SubMsgResult::Ok(SubMsgResponse {
+                    events: _,
+                    data: _,
+                    msg_responses: _,
+                }),
+        } => reply::exchange_for_single_liqudity(deps, env, payload),
         _ => Err(ContractError::UnknownReply {}),
     }
 }
 
 pub mod reply {
-    use cosmwasm_std::Uint128;
+    use cosmwasm_std::{ReplyOn, SubMsg, Uint128, WasmMsg};
     use cw20::{BalanceResponse, Cw20QueryMsg};
 
-    use crate::state::LP_BALANCES;
+    use crate::{
+        msg::{Asset, AssetInfo, ExternalExecuteMsg},
+        state::LP_BALANCES,
+    };
 
     use super::*;
 
@@ -990,5 +1044,66 @@ pub mod reply {
             .add_attribute("lp_token", lp_token)
             .add_attribute("lp_amount", lp_amount)
             .add_attribute("action", "add_liquidity"))
+    }
+
+    pub fn exchange_for_single_liqudity(
+        deps: DepsMut,
+        env: Env,
+        payload: Binary,
+    ) -> Result<Response<PalomaMsg>, ContractError> {
+        let (pair, depositor, lp_token, init_lp_balance, coins): (
+            String,
+            String,
+            String,
+            Uint128,
+            Vec<Coin>,
+        ) = from_json(payload)?;
+        let output_coin = Coin {
+            denom: coins[1].denom.clone(),
+            amount: deps
+                .querier
+                .query_balance(&env.contract.address, coins[1].denom.clone())?
+                .amount
+                - coins[1].amount,
+        };
+        assert!(!output_coin.amount.is_zero(), "Not enough output coin");
+        let payload = to_json_binary(&(depositor, lp_token, init_lp_balance))?;
+        let coins = vec![
+            Coin {
+                denom: coins[0].denom.clone(),
+                amount: coins[0].amount,
+            },
+            Coin {
+                denom: output_coin.denom.clone(),
+                amount: output_coin.amount,
+            },
+        ];
+        Ok(Response::new()
+            .add_submessage(SubMsg {
+                id: ADD_LIQUIDITY_REPLY_ID,
+                msg: CosmosMsg::Wasm(WasmMsg::Execute {
+                    contract_addr: pair.to_string(),
+                    msg: to_json_binary(&ExternalExecuteMsg::ProvideLiquidity {
+                        assets: coins
+                            .iter()
+                            .map(|coin| Asset {
+                                info: AssetInfo::NativeToken {
+                                    denom: coin.denom.clone(),
+                                },
+                                amount: coin.amount,
+                            })
+                            .collect(),
+                        slippage_tolerance: None,
+                        receiver: None,
+                    })?,
+                    funds: coins.clone(),
+                }),
+                payload,
+                gas_limit: None,
+                reply_on: ReplyOn::Success,
+            })
+            .add_attribute("coin0", coins[0].to_string())
+            .add_attribute("coin1", coins[1].to_string())
+            .add_attribute("action", "exchange_for_single_liqudity"))
     }
 }

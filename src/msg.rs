@@ -235,5 +235,4 @@ pub struct FeeInfoResponse {
     pub maker_fee_bps: u16,
 }
 
-
 impl CustomMsg for PalomaMsg {}
