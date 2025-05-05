@@ -10,6 +10,9 @@ pub struct InstantiateMsg {
 }
 
 #[cw_serde]
+pub struct MigrateMsg {}
+
+#[cw_serde]
 pub enum ExecuteMsg {
     Exchange {
         dex_router: Addr,
@@ -170,6 +173,15 @@ pub enum QueryMsg {
 pub enum ExternalQueryMsg {
     #[returns(PairInfo)]
     Pair {},
+    #[returns(PoolResponse)]
+    Pool {},
+    #[returns(ConfigResponse)]
+    Config {},
+    #[returns(FeeInfoResponse)]
+    FeeInfo {
+        /// The pair type for which we return fee information. Pair type is a [`PairType`] struct
+        pair_type: PairType,
+    },
 }
 
 /// This structure stores the main parameters for an palomadex pair
@@ -194,6 +206,36 @@ pub enum PairType {
     Stable {},
     /// Custom pair type
     Custom(String),
+}
+
+#[cw_serde]
+pub struct PoolResponse {
+    /// The assets in the pool together with asset amounts
+    pub assets: Vec<Asset>,
+    /// The total amount of LP tokens currently issued
+    pub total_share: Uint128,
+}
+
+#[cw_serde]
+pub struct ConfigResponse {
+    /// Last timestamp when the cumulative prices in the pool were updated
+    pub block_time_last: u64,
+    /// The pool's parameters
+    pub params: Option<Binary>,
+    /// The contract owner
+    pub owner: Addr,
+    /// The factory contract address
+    pub factory_addr: Addr,
+}
+
+#[cw_serde]
+pub struct FeeInfoResponse {
+    /// Contract address to send governance fees to
+    pub fee_address: Option<Addr>,
+    /// Total amount of fees (in bps) charged on a swap
+    pub total_fee_bps: u16,
+    /// Amount of fees (in bps) sent to the Maker contract
+    pub maker_fee_bps: u16,
 }
 
 impl CustomMsg for PalomaMsg {}

@@ -2,6 +2,17 @@ palomad tx wasm store artifacts/palomadex_trader_cw.wasm --from paloma17esj9dnjh
 b8ebeb8df29ca7403045c3b03780952bec7592230eca2a74fea5afafe4526b68
 code_id = 174
 
-palomad tx wasm store artifacts/palomadex_trader_cw.wasm --from paloma17esj9dnjhnpezfqmpwdwg2yldnc3udrdv5e76w --output json --gas auto --gas-adjustment 1.2 --fees 500ugrain -y
 ca34f17dacb2c6107bf0cc042b2a2bdc28350a7bd556c8b74f06b70cd129628b
 code_id = 175
+
+a963bd4f7ac19267570ce615b0cd8660e282db0989e630d1abd5362aeb1f1ce4
+code_id = 176
+
+
+code_id = 178
+
+5b8330d50509c7af6d44d4f16d6fee96e08524aec2a57bd491a155b2be108e03
+code_id = 179
+
+cb32ca953317df62a2d232263d03f14e03ad864d0efbb1965ca164af725042bb
+code_id = 180
