@@ -7,7 +7,7 @@ use cosmwasm_std::{
 use cw2::set_contract_version;
 
 use crate::error::ContractError;
-use crate::msg::{ExecuteMsg, InstantiateMsg, PalomaMsg, QueryMsg, SendTx};
+use crate::msg::{ExecuteMsg, InstantiateMsg, MigrateMsg, PalomaMsg, QueryMsg, SendTx};
 use crate::state::{State, CHAIN_SETTINGS, LP_BALANCES, STATE};
 
 // version info for migration info
@@ -18,6 +18,12 @@ const REMOVE_LIQUIDITY_REPLY_ID: u64 = 1;
 const EXECUTE_REPLY_ID: u64 = 2;
 const ADD_LIQUIDITY_REPLY_ID: u64 = 3;
 const EXECUTE_FOR_SINGLE_LIQUIDITY_REPLY_ID: u64 = 4;
+
+#[cfg_attr(not(feature = "library"), entry_point)]
+pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
+    set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+    Ok(Response::new().add_attribute("action", "migrate"))
+}
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
@@ -897,7 +903,9 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
             to_json_binary(&CHAIN_SETTINGS.load(deps.storage, chain_id)?)
         }
         QueryMsg::LpQuery { user, lp_token } => {
-            let lp_balance = LP_BALANCES.load(deps.storage, (user, lp_token))?;
+            let lp_balance = LP_BALANCES
+                .may_load(deps.storage, (user, lp_token))?
+                .unwrap_or_default();
             to_json_binary(&lp_balance)
         }
     }
@@ -1029,7 +1037,7 @@ pub mod reply {
     ) -> Result<Response<PalomaMsg>, ContractError> {
         let (depositor, lp_token, init_lp_balance): (String, String, Uint128) = from_json(payload)?;
         let result_lp_balance: BalanceResponse = deps.querier.query_wasm_smart(
-            depositor.clone(),
+            lp_token.clone(),
             &Cw20QueryMsg::Balance {
                 address: env.contract.address.to_string(),
             },

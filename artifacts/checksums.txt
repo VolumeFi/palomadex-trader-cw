@@ -1,1 +1,1 @@
-2eec712cc3eee6931d9761e27443c52f1bd6c10894b665d1b0ba48e2cd049fcd  palomadex_trader_cw.wasm
+cb32ca953317df62a2d232263d03f14e03ad864d0efbb1965ca164af725042bb  palomadex_trader_cw.wasm
