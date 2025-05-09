@@ -937,7 +937,7 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Response<PalomaMsg>,
                     data: _,
                     msg_responses: _,
                 }),
-        } => reply::execute_reply(payload),
+        } => reply::execute_reply(deps, env, payload),
         #[allow(deprecated)]
         Reply {
             id: ADD_LIQUIDITY_REPLY_ID,
@@ -1017,17 +1017,26 @@ pub mod reply {
             .add_attribute("action", "remove_liquidity"))
     }
 
-    pub fn execute_reply(payload: Binary) -> Result<Response<PalomaMsg>, ContractError> {
+    pub fn execute_reply(
+        deps: DepsMut,
+        env: Env,
+        payload: Binary,
+    ) -> Result<Response<PalomaMsg>, ContractError> {
         let (recipient, chain_id, coin): (String, String, Coin) = from_json(payload)?;
+        let mut increased_coin = deps
+            .querier
+            .query_balance(env.contract.address.clone(), coin.denom.clone())?;
+        increased_coin.amount -= coin.amount;
+        assert!(!increased_coin.amount.is_zero(), "Not enough output coin");
         Ok(Response::new()
             .add_message(CosmosMsg::Custom(PalomaMsg::SkywayMsg {
                 send_tx: SendTx {
                     remote_chain_destination_address: recipient,
-                    amount: coin.to_string(),
+                    amount: increased_coin.to_string(),
                     chain_reference_id: chain_id,
                 },
             }))
-            .add_attribute("coin_out", coin.to_string())
+            .add_attribute("coin_out", increased_coin.to_string())
             .add_attribute("action", "execute_reply"))
     }
     pub fn add_liquidity(
