@@ -122,6 +122,9 @@ pub fn execute(
             amount,
             receiver,
         } => execute::remove_liquidity(deps, env, info, chain_id, pair, amount, receiver),
+        ExecuteMsg::CancelTx { transaction_id } => {
+            execute::cancel_tx(deps, env, info, transaction_id)
+        }
     }
 }
 
@@ -135,8 +138,8 @@ pub mod execute {
     use super::*;
     use crate::{
         msg::{
-            Asset, AssetInfo, ConfigResponse, ExecuteJob, ExternalExecuteMsg, ExternalQueryMsg,
-            FeeInfoResponse, PairInfo, PairType, PoolResponse, SwapOperation,
+            Asset, AssetInfo, CancelTx, ConfigResponse, ExecuteJob, ExternalExecuteMsg,
+            ExternalQueryMsg, FeeInfoResponse, PairInfo, PairType, PoolResponse, SwapOperation,
         },
         state::{ChainSetting, CHAIN_SETTINGS, LP_BALANCES, MESSAGE_TIMESTAMP},
     };
@@ -430,11 +433,12 @@ pub mod execute {
             .iter()
             .map(|amount| {
                 CosmosMsg::Custom(PalomaMsg::SkywayMsg {
-                    send_tx: SendTx {
+                    send_tx: Some(SendTx {
                         remote_chain_destination_address: recipient.clone(),
                         amount: amount.clone(),
                         chain_reference_id: chain_id.clone(),
-                    },
+                    }),
+                    cancel_tx: None,
                 })
             })
             .collect::<Vec<_>>();
@@ -893,6 +897,26 @@ pub mod execute {
             }))
             .add_attribute("action", "send_token"))
     }
+
+    pub fn cancel_tx(
+        deps: DepsMut,
+        _env: Env,
+        info: MessageInfo,
+        transaction_id: u64,
+    ) -> Result<Response<PalomaMsg>, ContractError> {
+        let state = STATE.load(deps.storage)?;
+        assert!(
+            state.owners.iter().any(|x| x == info.sender),
+            "Unauthorized"
+        );
+        Ok(Response::new()
+            .add_message(CosmosMsg::Custom(PalomaMsg::SkywayMsg {
+                send_tx: None,
+                cancel_tx: Some(CancelTx { transaction_id }),
+            }))
+            .add_attribute("action", "cancel_tx")
+            .add_attribute("transaction_id", transaction_id.to_string()))
+    }
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -997,18 +1021,20 @@ pub mod reply {
         Ok(Response::new()
             .add_messages(vec![
                 CosmosMsg::Custom(PalomaMsg::SkywayMsg {
-                    send_tx: SendTx {
+                    send_tx: Some(SendTx {
                         remote_chain_destination_address: receiver.clone(),
                         amount: coins[0].to_string(),
                         chain_reference_id: chain_id.clone(),
-                    },
+                    }),
+                    cancel_tx: None,
                 }),
                 CosmosMsg::Custom(PalomaMsg::SkywayMsg {
-                    send_tx: SendTx {
+                    send_tx: Some(SendTx {
                         remote_chain_destination_address: receiver,
                         amount: coins[1].to_string(),
                         chain_reference_id: chain_id,
-                    },
+                    }),
+                    cancel_tx: None,
                 }),
             ])
             .add_attribute("lp_token", lp_token)
@@ -1030,11 +1056,12 @@ pub mod reply {
         assert!(!increased_coin.amount.is_zero(), "Not enough output coin");
         Ok(Response::new()
             .add_message(CosmosMsg::Custom(PalomaMsg::SkywayMsg {
-                send_tx: SendTx {
+                send_tx: Some(SendTx {
                     remote_chain_destination_address: recipient,
                     amount: increased_coin.to_string(),
                     chain_reference_id: chain_id,
-                },
+                }),
+                cancel_tx: None,
             }))
             .add_attribute("coin_out", increased_coin.to_string())
             .add_attribute("action", "execute_reply"))
