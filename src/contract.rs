@@ -78,6 +78,40 @@ pub fn execute(
             amounts,
             recipient,
         } => execute::send_to_evm(deps, env, info, chain_id, amounts, recipient),
+        ExecuteMsg::Deposit {
+            incentivizer,
+            token,
+            amount,
+            depositor,
+        } => execute::deposit(deps, info, incentivizer, token, amount, depositor),
+        ExecuteMsg::Withdraw {
+            incentivizer,
+            token,
+            amount,
+            recipient,
+        } => execute::withdraw(deps, info, incentivizer, token, amount, recipient),
+        ExecuteMsg::ClaimRewards {
+            incentivizer,
+            tokens,
+            recipient,
+        } => execute::claim_rewards(deps, info, incentivizer, tokens, recipient),
+        ExecuteMsg::CreateLock {
+            vepadex,
+            coin,
+            end_lock_time,
+            user,
+        } => execute::create_lock(deps, info, vepadex, coin, end_lock_time, user),
+        ExecuteMsg::IncreaseLockAmount {
+            vepadex,
+            user,
+            coin,
+        } => execute::increase_lock_amount(deps, info, vepadex, user, coin),
+        ExecuteMsg::Unlock { vepadex, user } => execute::unlock(deps, info, vepadex, user),
+        ExecuteMsg::IncreaseEndLockTime {
+            vepadex,
+            end_lock_time,
+            user,
+        } => execute::increase_end_lock_time(deps, info, vepadex, end_lock_time, user),
         ExecuteMsg::SetChainSetting {
             chain_id,
             compass_job_id,
@@ -132,14 +166,15 @@ pub mod execute {
     use std::collections::BTreeMap;
 
     use cosmwasm_std::{Addr, Decimal, Decimal256, ReplyOn, SubMsg, Uint128, Uint256, WasmMsg};
-    use cw20::{BalanceResponse, Cw20QueryMsg};
+    use cw20::{BalanceResponse, Cw20ExecuteMsg, Cw20QueryMsg};
     use ethabi::{Address, Contract, Function, Param, ParamType, StateMutability, Token, Uint};
 
     use super::*;
     use crate::{
         msg::{
-            Asset, AssetInfo, CancelTx, ConfigResponse, ExecuteJob, ExternalExecuteMsg,
-            ExternalQueryMsg, FeeInfoResponse, PairInfo, PairType, PoolResponse, SwapOperation,
+            Asset, AssetInfo, CancelTx, ConfigResponse, Cw20Msg, ExecuteJob, ExternalExecuteMsg,
+            ExternalQueryMsg, FeeInfoResponse, IncentivizerExecuteMsg, PairInfo, PairType,
+            PoolResponse, SwapOperation, VePadexExecuteMsg,
         },
         state::{ChainSetting, CHAIN_SETTINGS, LP_BALANCES, MESSAGE_TIMESTAMP},
     };
@@ -445,6 +480,206 @@ pub mod execute {
         Ok(Response::new()
             .add_messages(messages)
             .add_attribute("action", "send_to_evm"))
+    }
+
+    pub fn deposit(
+        deps: DepsMut,
+        info: MessageInfo,
+        incentivizer: Addr,
+        token: String,
+        amount: Uint128,
+        depositor: String,
+    ) -> Result<Response<PalomaMsg>, ContractError> {
+        let state = STATE.load(deps.storage)?;
+        assert!(
+            state.owners.iter().any(|x| x == info.sender),
+            "Unauthorized"
+        );
+        LP_BALANCES.update(
+            deps.storage,
+            (depositor.clone(), token.clone()),
+            |lp_balance: Option<Uint128>| -> StdResult<_> {
+                let balance = lp_balance.unwrap_or_default();
+                assert!(balance >= amount, "Insufficient balance");
+                Ok(balance - amount)
+            },
+        )?;
+        let msg = WasmMsg::Execute {
+            contract_addr: token.clone(),
+            msg: to_json_binary(&Cw20ExecuteMsg::Send {
+                contract: deps
+                    .api
+                    .addr_validate(incentivizer.as_str())
+                    .unwrap()
+                    .to_string(),
+                amount,
+                msg: to_json_binary(&Cw20Msg::Deposit {
+                    recipient: Some(depositor),
+                })?,
+            })?,
+            funds: vec![],
+        };
+        Ok(Response::new()
+            .add_message(msg)
+            .add_attribute("action", "deposit")
+            .add_attribute("token", token)
+            .add_attribute("amount", amount.to_string()))
+    }
+
+    pub fn withdraw(
+        deps: DepsMut,
+        info: MessageInfo,
+        incentivizer: Addr,
+        token: String,
+        amount: Uint128,
+        recipient: String,
+    ) -> Result<Response<PalomaMsg>, ContractError> {
+        let state = STATE.load(deps.storage)?;
+        assert!(
+            state.owners.iter().any(|x| x == info.sender),
+            "Unauthorized"
+        );
+        LP_BALANCES.update(
+            deps.storage,
+            (recipient.clone(), token.clone()),
+            |lp_balance: Option<Uint128>| -> StdResult<_> {
+                let balance = lp_balance.unwrap_or_default();
+                Ok(balance + amount)
+            },
+        )?;
+        let msg = WasmMsg::Execute {
+            contract_addr: deps.api.addr_validate(incentivizer.as_str())?.to_string(),
+            msg: to_json_binary(&IncentivizerExecuteMsg::Withdraw {
+                lp_token: token.clone(),
+                amount,
+                user: Some(recipient),
+            })?,
+            funds: vec![],
+        };
+        Ok(Response::new()
+            .add_message(msg)
+            .add_attribute("action", "withdraw")
+            .add_attribute("token", token)
+            .add_attribute("amount", amount.to_string()))
+    }
+
+    pub fn claim_rewards(
+        deps: DepsMut,
+        info: MessageInfo,
+        incentivizer: Addr,
+        lp_tokens: Vec<String>,
+        user: String,
+    ) -> Result<Response<PalomaMsg>, ContractError> {
+        let state = STATE.load(deps.storage)?;
+        assert!(
+            state.owners.iter().any(|x| x == info.sender),
+            "Unauthorized"
+        );
+        let msg = WasmMsg::Execute {
+            contract_addr: deps.api.addr_validate(incentivizer.as_str())?.to_string(),
+            msg: to_json_binary(&IncentivizerExecuteMsg::ClaimRewards {
+                lp_tokens,
+                user: Some(user),
+            })?,
+            funds: vec![],
+        };
+        Ok(Response::new()
+            .add_message(msg)
+            .add_attribute("action", "claim_rewards"))
+    }
+
+    pub fn create_lock(
+        deps: DepsMut,
+        info: MessageInfo,
+        vepadex: Addr,
+        coin: Coin,
+        end_lock_time: u64,
+        user: String,
+    ) -> Result<Response<PalomaMsg>, ContractError> {
+        let state = STATE.load(deps.storage)?;
+        assert!(
+            state.owners.iter().any(|x| x == info.sender),
+            "Unauthorized"
+        );
+        let msg = WasmMsg::Execute {
+            contract_addr: vepadex.to_string(),
+            msg: to_json_binary(&VePadexExecuteMsg::CreateLock {
+                end_lock_time,
+                user: Some(user),
+            })?,
+            funds: vec![coin],
+        };
+        Ok(Response::new()
+            .add_message(msg)
+            .add_attribute("action", "create_lock"))
+    }
+
+    pub fn increase_lock_amount(
+        deps: DepsMut,
+        info: MessageInfo,
+        vepadex: Addr,
+        user: String,
+        coin: Coin,
+    ) -> Result<Response<PalomaMsg>, ContractError> {
+        let state = STATE.load(deps.storage)?;
+        assert!(
+            state.owners.iter().any(|x| x == info.sender),
+            "Unauthorized"
+        );
+        let msg = WasmMsg::Execute {
+            contract_addr: vepadex.to_string(),
+            msg: to_json_binary(&VePadexExecuteMsg::IncreaseLockAmount { user: Some(user) })?,
+            funds: vec![coin],
+        };
+        Ok(Response::new()
+            .add_message(msg)
+            .add_attribute("action", "increase_lock_amount"))
+    }
+
+    pub fn unlock(
+        deps: DepsMut,
+        info: MessageInfo,
+        vepadex: Addr,
+        user: String,
+    ) -> Result<Response<PalomaMsg>, ContractError> {
+        let state = STATE.load(deps.storage)?;
+        assert!(
+            state.owners.iter().any(|x| x == info.sender),
+            "Unauthorized"
+        );
+        let msg = WasmMsg::Execute {
+            contract_addr: vepadex.to_string(),
+            msg: to_json_binary(&VePadexExecuteMsg::Withdraw { user: Some(user) })?,
+            funds: vec![],
+        };
+        Ok(Response::new()
+            .add_message(msg)
+            .add_attribute("action", "unlock"))
+    }
+
+    pub fn increase_end_lock_time(
+        deps: DepsMut,
+        info: MessageInfo,
+        vepadex: Addr,
+        end_lock_time: u64,
+        user: String,
+    ) -> Result<Response<PalomaMsg>, ContractError> {
+        let state = STATE.load(deps.storage)?;
+        assert!(
+            state.owners.iter().any(|x| x == info.sender),
+            "Unauthorized"
+        );
+        let msg = WasmMsg::Execute {
+            contract_addr: vepadex.to_string(),
+            msg: to_json_binary(&VePadexExecuteMsg::IncreaseEndLockTime {
+                end_lock_time,
+                user: Some(user),
+            })?,
+            funds: vec![],
+        };
+        Ok(Response::new()
+            .add_message(msg)
+            .add_attribute("action", "increase_end_lock_time"))
     }
 
     pub fn set_chain_setting(

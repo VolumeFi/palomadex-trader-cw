@@ -47,6 +47,43 @@ pub enum ExecuteMsg {
         amounts: Vec<String>,
         recipient: String,
     },
+    Deposit {
+        incentivizer: Addr,
+        token: String,
+        amount: Uint128,
+        depositor: String,
+    },
+    Withdraw {
+        incentivizer: Addr,
+        token: String,
+        amount: Uint128,
+        recipient: String,
+    },
+    ClaimRewards {
+        incentivizer: Addr,
+        tokens: Vec<String>,
+        recipient: String,
+    },
+    CreateLock {
+        vepadex: Addr,
+        coin: Coin,
+        end_lock_time: u64,
+        user: String,
+    },
+    IncreaseLockAmount {
+        vepadex: Addr,
+        user: String,
+        coin: Coin,
+    },
+    Unlock {
+        vepadex: Addr,
+        user: String,
+    },
+    IncreaseEndLockTime {
+        vepadex: Addr,
+        end_lock_time: u64,
+        user: String,
+    },
     SetChainSetting {
         chain_id: String,
         compass_job_id: String,
@@ -126,6 +163,49 @@ pub enum ExternalExecuteMsg {
         amount: Uint128,
         msg: Binary,
     },
+}
+
+#[cw_serde]
+pub enum IncentivizerExecuteMsg {
+    Withdraw {
+        /// The LP token cw20 address or token factory denom
+        lp_token: String,
+        /// The amount to withdraw. Must not exceed total staked amount.
+        amount: Uint128,
+        user: Option<String>,
+    },
+    ClaimRewards {
+        /// The LP token cw20 address or token factory denom
+        lp_tokens: Vec<String>,
+        user: Option<String>,
+    },
+}
+
+#[cw_serde]
+pub enum VePadexExecuteMsg {
+    CreateLock {
+        end_lock_time: u64,
+        user: Option<String>,
+    },
+    IncreaseLockAmount {
+        user: Option<String>,
+    },
+    Withdraw {
+        user: Option<String>,
+    },
+    Checkpoint {},
+    IncreaseEndLockTime {
+        // unlock_week specifies the week at which to unlock
+        // in units of weeks since the epoch
+        end_lock_time: u64,
+        user: Option<String>,
+    },
+}
+
+#[cw_serde]
+/// Cw20 hook message template
+pub enum Cw20Msg {
+    Deposit { recipient: Option<String> },
 }
 
 #[cw_serde]
