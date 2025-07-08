@@ -8,7 +8,9 @@ use cw2::set_contract_version;
 
 use crate::error::ContractError;
 use crate::msg::{ExecuteMsg, InstantiateMsg, MigrateMsg, PalomaMsg, QueryMsg, SendTx};
-use crate::state::{State, CHAIN_SETTINGS, LP_BALANCES, STATE};
+use crate::state::{
+    IncentivesSetting, State, CHAIN_SETTINGS, INCENTIVES_SETTING, LP_BALANCES, STATE,
+};
 
 // version info for migration info
 const CONTRACT_NAME: &str = "crates.io:palomadex-trader-cw";
@@ -18,10 +20,17 @@ const REMOVE_LIQUIDITY_REPLY_ID: u64 = 1;
 const EXECUTE_REPLY_ID: u64 = 2;
 const ADD_LIQUIDITY_REPLY_ID: u64 = 3;
 const EXECUTE_FOR_SINGLE_LIQUIDITY_REPLY_ID: u64 = 4;
+const CHECK_PADEX_DIFF_REPLY_ID: u64 = 5;
 
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
+pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, ContractError> {
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+    let incentives_setting = IncentivesSetting {
+        incentivizer: deps.api.addr_validate(msg.incentivizer.as_str())?,
+        padex: msg.padex,
+        vepades: msg.vepades,
+    };
+    INCENTIVES_SETTING.save(deps.storage, &incentives_setting)?;
     Ok(Response::new().add_attribute("action", "migrate"))
 }
 
@@ -40,8 +49,14 @@ pub fn instantiate(
             .collect(),
         retry_delay: msg.retry_delay,
     };
+    let incentives_setting = IncentivesSetting {
+        incentivizer: deps.api.addr_validate(msg.incentivizer.as_str())?,
+        padex: msg.padex,
+        vepades: msg.vepades,
+    };
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
     STATE.save(deps.storage, &state)?;
+    INCENTIVES_SETTING.save(deps.storage, &incentives_setting)?;
     Ok(Response::new().add_attribute("action", "instantiate"))
 }
 
@@ -83,35 +98,40 @@ pub fn execute(
             token,
             amount,
             depositor,
-        } => execute::deposit(deps, info, incentivizer, token, amount, depositor),
+        } => execute::deposit(deps, env, info, incentivizer, token, amount, depositor),
         ExecuteMsg::Withdraw {
             incentivizer,
             token,
             amount,
             recipient,
-        } => execute::withdraw(deps, info, incentivizer, token, amount, recipient),
+        } => execute::withdraw(deps, env, info, incentivizer, token, amount, recipient),
         ExecuteMsg::ClaimRewards {
             incentivizer,
             tokens,
             recipient,
-        } => execute::claim_rewards(deps, info, incentivizer, tokens, recipient),
+        } => execute::claim_rewards(deps, env, info, incentivizer, tokens, recipient),
         ExecuteMsg::CreateLock {
             vepadex,
             coin,
             end_lock_time,
             user,
-        } => execute::create_lock(deps, info, vepadex, coin, end_lock_time, user),
+        } => execute::create_lock(deps, env, info, vepadex, coin, end_lock_time, user),
         ExecuteMsg::IncreaseLockAmount {
             vepadex,
             user,
             coin,
-        } => execute::increase_lock_amount(deps, info, vepadex, user, coin),
-        ExecuteMsg::Unlock { vepadex, user } => execute::unlock(deps, info, vepadex, user),
+        } => execute::increase_lock_amount(deps, env, info, vepadex, user, coin),
+        ExecuteMsg::Unlock { vepadex, user } => execute::unlock(deps, env, info, vepadex, user),
         ExecuteMsg::IncreaseEndLockTime {
             vepadex,
             end_lock_time,
             user,
         } => execute::increase_end_lock_time(deps, info, vepadex, end_lock_time, user),
+        ExecuteMsg::AddLpToken {
+            lp_token,
+            user,
+            amount,
+        } => execute::add_lp_token(deps, info, lp_token, user, amount),
         ExecuteMsg::SetChainSetting {
             chain_id,
             compass_job_id,
@@ -464,9 +484,26 @@ pub mod execute {
             state.owners.iter().any(|x| x == info.sender),
             "Unauthorized"
         );
+        let incentives_setting = INCENTIVES_SETTING.load(deps.storage)?;
         let messages = amounts
             .iter()
             .map(|amount| {
+                let coin = Coin::from_str(amount).unwrap();
+                if coin.denom == incentives_setting.padex {
+                    LP_BALANCES
+                        .update(
+                            deps.storage,
+                            (recipient.clone(), incentives_setting.padex.clone()),
+                            |lp_balance: Option<Uint128>| -> StdResult<_> {
+                                let mut balance = lp_balance.unwrap_or_default();
+                                if balance > coin.amount {
+                                    balance -= coin.amount;
+                                }
+                                Ok(balance)
+                            },
+                        )
+                        .unwrap();
+                }
                 CosmosMsg::Custom(PalomaMsg::SkywayMsg {
                     send_tx: Some(SendTx {
                         remote_chain_destination_address: recipient.clone(),
@@ -484,6 +521,7 @@ pub mod execute {
 
     pub fn deposit(
         deps: DepsMut,
+        env: Env,
         info: MessageInfo,
         incentivizer: Addr,
         token: String,
@@ -504,6 +542,12 @@ pub mod execute {
                 Ok(balance - amount)
             },
         )?;
+        let incentives_setting = INCENTIVES_SETTING.load(deps.storage)?;
+        let padex_balance = deps
+            .querier
+            .query_balance(env.contract.address.clone(), incentives_setting.padex)
+            .unwrap();
+        let payload = to_json_binary(&(depositor.clone(), padex_balance))?;
         let msg = WasmMsg::Execute {
             contract_addr: token.clone(),
             msg: to_json_binary(&Cw20ExecuteMsg::Send {
@@ -520,7 +564,13 @@ pub mod execute {
             funds: vec![],
         };
         Ok(Response::new()
-            .add_message(msg)
+            .add_submessage(SubMsg {
+                id: CHECK_PADEX_DIFF_REPLY_ID,
+                msg: CosmosMsg::Wasm(msg),
+                payload,
+                gas_limit: None,
+                reply_on: ReplyOn::Success,
+            })
             .add_attribute("action", "deposit")
             .add_attribute("token", token)
             .add_attribute("amount", amount.to_string()))
@@ -528,6 +578,7 @@ pub mod execute {
 
     pub fn withdraw(
         deps: DepsMut,
+        env: Env,
         info: MessageInfo,
         incentivizer: Addr,
         token: String,
@@ -547,6 +598,12 @@ pub mod execute {
                 Ok(balance + amount)
             },
         )?;
+        let incentives_setting = INCENTIVES_SETTING.load(deps.storage)?;
+        let padex_balance = deps
+            .querier
+            .query_balance(env.contract.address.clone(), incentives_setting.padex)
+            .unwrap();
+        let payload = to_json_binary(&(recipient.clone(), padex_balance))?;
         let msg = WasmMsg::Execute {
             contract_addr: deps.api.addr_validate(incentivizer.as_str())?.to_string(),
             msg: to_json_binary(&IncentivizerExecuteMsg::Withdraw {
@@ -557,7 +614,13 @@ pub mod execute {
             funds: vec![],
         };
         Ok(Response::new()
-            .add_message(msg)
+            .add_submessage(SubMsg {
+                id: CHECK_PADEX_DIFF_REPLY_ID,
+                msg: CosmosMsg::Wasm(msg),
+                payload,
+                gas_limit: None,
+                reply_on: ReplyOn::Success,
+            })
             .add_attribute("action", "withdraw")
             .add_attribute("token", token)
             .add_attribute("amount", amount.to_string()))
@@ -565,6 +628,7 @@ pub mod execute {
 
     pub fn claim_rewards(
         deps: DepsMut,
+        env: Env,
         info: MessageInfo,
         incentivizer: Addr,
         lp_tokens: Vec<String>,
@@ -579,17 +643,30 @@ pub mod execute {
             contract_addr: deps.api.addr_validate(incentivizer.as_str())?.to_string(),
             msg: to_json_binary(&IncentivizerExecuteMsg::ClaimRewards {
                 lp_tokens,
-                user: Some(user),
+                user: Some(user.clone()),
             })?,
             funds: vec![],
         };
+        let incentives_setting = INCENTIVES_SETTING.load(deps.storage)?;
+        let padex_balance = deps
+            .querier
+            .query_balance(env.contract.address.clone(), incentives_setting.padex)
+            .unwrap();
+        let payload = to_json_binary(&(user, padex_balance))?;
         Ok(Response::new()
-            .add_message(msg)
+            .add_submessage(SubMsg {
+                id: CHECK_PADEX_DIFF_REPLY_ID,
+                msg: CosmosMsg::Wasm(msg),
+                payload,
+                gas_limit: None,
+                reply_on: ReplyOn::Success,
+            })
             .add_attribute("action", "claim_rewards"))
     }
 
     pub fn create_lock(
         deps: DepsMut,
+        env: Env,
         info: MessageInfo,
         vepadex: Addr,
         coin: Coin,
@@ -601,6 +678,12 @@ pub mod execute {
             state.owners.iter().any(|x| x == info.sender),
             "Unauthorized"
         );
+        let incentives_setting = INCENTIVES_SETTING.load(deps.storage)?;
+        let padex_balance = deps
+            .querier
+            .query_balance(env.contract.address.clone(), incentives_setting.padex)
+            .unwrap();
+        let payload = to_json_binary(&(user.clone(), padex_balance))?;
         let msg = WasmMsg::Execute {
             contract_addr: vepadex.to_string(),
             msg: to_json_binary(&VePadexExecuteMsg::CreateLock {
@@ -610,12 +693,19 @@ pub mod execute {
             funds: vec![coin],
         };
         Ok(Response::new()
-            .add_message(msg)
+            .add_submessage(SubMsg {
+                id: CHECK_PADEX_DIFF_REPLY_ID,
+                msg: CosmosMsg::Wasm(msg),
+                payload,
+                gas_limit: None,
+                reply_on: ReplyOn::Success,
+            })
             .add_attribute("action", "create_lock"))
     }
 
     pub fn increase_lock_amount(
         deps: DepsMut,
+        env: Env,
         info: MessageInfo,
         vepadex: Addr,
         user: String,
@@ -626,18 +716,31 @@ pub mod execute {
             state.owners.iter().any(|x| x == info.sender),
             "Unauthorized"
         );
+        let incentives_setting = INCENTIVES_SETTING.load(deps.storage)?;
+        let padex_balance = deps
+            .querier
+            .query_balance(env.contract.address.clone(), incentives_setting.padex)
+            .unwrap();
+        let payload = to_json_binary(&(user.clone(), padex_balance))?;
         let msg = WasmMsg::Execute {
             contract_addr: vepadex.to_string(),
             msg: to_json_binary(&VePadexExecuteMsg::IncreaseLockAmount { user: Some(user) })?,
             funds: vec![coin],
         };
         Ok(Response::new()
-            .add_message(msg)
+            .add_submessage(SubMsg {
+                id: CHECK_PADEX_DIFF_REPLY_ID,
+                msg: CosmosMsg::Wasm(msg),
+                payload,
+                gas_limit: None,
+                reply_on: ReplyOn::Success,
+            })
             .add_attribute("action", "increase_lock_amount"))
     }
 
     pub fn unlock(
         deps: DepsMut,
+        env: Env,
         info: MessageInfo,
         vepadex: Addr,
         user: String,
@@ -647,13 +750,25 @@ pub mod execute {
             state.owners.iter().any(|x| x == info.sender),
             "Unauthorized"
         );
+        let incentives_setting = INCENTIVES_SETTING.load(deps.storage)?;
+        let padex_balance = deps
+            .querier
+            .query_balance(env.contract.address.clone(), incentives_setting.padex)
+            .unwrap();
+        let payload = to_json_binary(&(user.clone(), padex_balance))?;
         let msg = WasmMsg::Execute {
             contract_addr: vepadex.to_string(),
             msg: to_json_binary(&VePadexExecuteMsg::Withdraw { user: Some(user) })?,
             funds: vec![],
         };
         Ok(Response::new()
-            .add_message(msg)
+            .add_submessage(SubMsg {
+                id: CHECK_PADEX_DIFF_REPLY_ID,
+                msg: CosmosMsg::Wasm(msg),
+                payload,
+                gas_limit: None,
+                reply_on: ReplyOn::Success,
+            })
             .add_attribute("action", "unlock"))
     }
 
@@ -680,6 +795,32 @@ pub mod execute {
         Ok(Response::new()
             .add_message(msg)
             .add_attribute("action", "increase_end_lock_time"))
+    }
+
+    pub fn add_lp_token(
+        deps: DepsMut,
+        info: MessageInfo,
+        lp_token: String,
+        user: String,
+        amount: Uint128,
+    ) -> Result<Response<PalomaMsg>, ContractError> {
+        let state = STATE.load(deps.storage)?;
+        assert!(
+            state.owners.iter().any(|x| x == info.sender),
+            "Unauthorized"
+        );
+        LP_BALANCES.update(
+            deps.storage,
+            (user.clone(), lp_token.clone()),
+            |lp_balance: Option<Uint128>| -> StdResult<_> {
+                Ok(lp_balance.unwrap_or_default() + amount)
+            },
+        )?;
+        Ok(Response::new()
+            .add_attribute("action", "add_lp_token")
+            .add_attribute("lp_token", lp_token)
+            .add_attribute("user", user)
+            .add_attribute("amount", amount.to_string()))
     }
 
     pub fn set_chain_setting(
@@ -1221,6 +1362,18 @@ pub fn reply(deps: DepsMut, env: Env, msg: Reply) -> Result<Response<PalomaMsg>,
                     msg_responses: _,
                 }),
         } => reply::exchange_for_single_liqudity(deps, env, payload),
+        #[allow(deprecated)]
+        Reply {
+            id: CHECK_PADEX_DIFF_REPLY_ID,
+            payload,
+            gas_used: _,
+            result:
+                SubMsgResult::Ok(SubMsgResponse {
+                    events: _,
+                    data: _,
+                    msg_responses: _,
+                }),
+        } => reply::check_padex_diff(deps, payload),
         _ => Err(ContractError::UnknownReply {}),
     }
 }
@@ -1384,5 +1537,38 @@ pub mod reply {
             .add_attribute("coin0", coins[0].to_string())
             .add_attribute("coin1", coins[1].to_string())
             .add_attribute("action", "exchange_for_single_liqudity"))
+    }
+    pub fn check_padex_diff(
+        deps: DepsMut,
+        payload: Binary,
+    ) -> Result<Response<PalomaMsg>, ContractError> {
+        let (user, padex_balance): (String, Coin) = from_json(payload)?;
+        let new_balance = deps.querier.query_balance(
+            deps.api.addr_validate(user.as_str())?,
+            padex_balance.denom.clone(),
+        )?;
+        if new_balance.amount > padex_balance.amount {
+            let diff_balance = new_balance.amount - padex_balance.amount;
+            if !diff_balance.is_zero() {
+                LP_BALANCES.update(
+                    deps.storage,
+                    (user.clone(), padex_balance.denom.clone()),
+                    |balance| -> StdResult<_> { Ok(balance.unwrap_or_default() + diff_balance) },
+                )?;
+            }
+        } else {
+            let diff_balance = padex_balance.amount - new_balance.amount;
+            if !diff_balance.is_zero() {
+                LP_BALANCES.update(
+                    deps.storage,
+                    (user.clone(), padex_balance.denom.clone()),
+                    |balance| -> StdResult<_> { Ok(balance.unwrap_or_default() - diff_balance) },
+                )?;
+            }
+        }
+        Ok(Response::new()
+            .add_attribute("action", "claim_rewards")
+            .add_attribute("user", user)
+            .add_attribute("padex_balance", padex_balance.to_string()))
     }
 }
