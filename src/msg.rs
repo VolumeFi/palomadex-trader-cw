@@ -7,10 +7,17 @@ use cosmwasm_std::{Addr, Binary, Coin, CustomMsg, Decimal, Uint128, Uint256};
 pub struct InstantiateMsg {
     pub retry_delay: u64,
     pub owners: Vec<String>,
+    pub incentivizer: Addr,
+    pub padex: String,
+    pub vepades: String,
 }
 
 #[cw_serde]
-pub struct MigrateMsg {}
+pub struct MigrateMsg {
+    pub incentivizer: Addr,
+    pub padex: String,
+    pub vepades: String,
+}
 
 #[cw_serde]
 pub enum ExecuteMsg {
@@ -83,6 +90,11 @@ pub enum ExecuteMsg {
         vepadex: Addr,
         end_lock_time: u64,
         user: String,
+    },
+    AddLpToken {
+        lp_token: String,
+        user: String,
+        amount: Uint128,
     },
     SetChainSetting {
         chain_id: String,

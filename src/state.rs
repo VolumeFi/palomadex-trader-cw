@@ -17,7 +17,15 @@ pub struct ChainSetting {
     pub main_job_id: String,
 }
 
+#[cw_serde]
+pub struct IncentivesSetting {
+    pub incentivizer: Addr,
+    pub padex: String,
+    pub vepades: String,
+}
+
 pub const CHAIN_SETTINGS: Map<String, ChainSetting> = Map::new("chain_settings");
 pub const STATE: Item<State> = Item::new("state");
 pub const LP_BALANCES: Map<(String, String), Uint128> = Map::new("lp_balances");
 pub const MESSAGE_TIMESTAMP: Map<(String, String), Timestamp> = Map::new("message_timestamp");
+pub const INCENTIVES_SETTING: Item<IncentivesSetting> = Item::new("incentives_setting");
